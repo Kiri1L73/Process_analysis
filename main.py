@@ -2,6 +2,10 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import psutil
 import time
+from datetime import datetime
+from openpyxl import Workbook, load_workbook
+from openpyxl.utils import get_column_letter
+import os
 
 # Пороги для превышения CPU, RAM (%)
 CPU_THRESHOLD = 80
@@ -51,11 +55,81 @@ class Process_analysis:
         self.notification_cooldown = 30  # 30 секунд между уведомлениями для каждого PID
         self.last_notification_time = {}
 
+        # Инициализация файла с подозрительными процессами
+        created = self.create_file()
+        if created:
+            messagebox.showinfo("Создание файла с перегружающими процессами", "Создан файл <Перегружающие процессы в системе.xlsx>.")
+
         # Запуск обновлений
         self.update_process()
         self.update_processes()
 
-    def get_processes(self):  # Функция сбора информации о запущенных процессах
+    def create_file(self): # Функция создания Excel-файла
+        if not os.path.exists('Перегружающие процессы в системе.xlsx'):
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Перегрузки"
+            headers = ['Дата и время', 'PID', 'Имя', 'CPU %', 'RAM %', 'Путь']
+            ws.append(headers)
+            # Установка ширины столбцов по длине заголовков
+            for col_idx, header in enumerate(headers, 1):
+                col_letter = get_column_letter(col_idx)
+                ws.column_dimensions[col_letter].width = len(header) + 2
+            wb.save('Перегружающие процессы в системе.xlsx')
+            return True
+        else:
+            try:
+                wb = load_workbook('Перегружающие процессы в системе.xlsx')
+                ws = wb.active
+                if ws.max_row == 0 or ws.cell(1, 1).value is None:
+                    headers = ['Дата и время', 'PID', 'Имя', 'CPU %', 'RAM %', 'Путь']
+                    ws.append(headers)
+                    for col_idx, header in enumerate(headers, 1):
+                        col_letter = get_column_letter(col_idx)
+                        ws.column_dimensions[col_letter].width = len(header) + 2
+                    wb.save('Перегружающие процессы в системе.xlsx')
+            except Exception:
+                os.remove('Перегружающие процессы в системе.xlsx')
+                return self.create_file()
+            return False
+
+    def load_file(self, proc): # Функция записи информации о перегружающих процессах в Excel-файл
+        try:
+            wb = load_workbook('Перегружающие процессы в системе.xlsx')
+            ws = wb.active
+
+            new_row = [
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                proc['pid'],
+                proc['name'],
+                f"{proc['cpu']:.1f}",
+                f"{proc['ram']:.1f}",
+                proc['exe']
+            ]
+            ws.append(new_row)
+
+            # Пересчёт максимальной длины для каждого столбца
+            headers = ['Дата и время', 'PID', 'Имя', 'CPU %', 'RAM %', 'Путь']
+            max_lengths = [len(h) for h in headers]
+
+            for row in ws.iter_rows(values_only=True):
+                for col_idx, value in enumerate(row):
+                    if value is not None:
+                        length = len(str(value))
+                        if length > max_lengths[col_idx]:
+                            max_lengths[col_idx] = length
+
+            # Установка ширины столбцов (с запасом 2 символа)
+            for col_idx, max_len in enumerate(max_lengths, 1):
+                col_letter = get_column_letter(col_idx)
+                ws.column_dimensions[col_letter].width = max_len + 2
+
+            wb.save('Перегружающие процессы в системе.xlsx')
+
+        except Exception as e:
+            self.status_var.set(f"Ошибка записи файла: {e}")
+
+    def get_processes(self): # Функция сбора информации о запущенных процессах
         proc_list = []
         for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent', 'exe']):
             try:
@@ -73,21 +147,18 @@ class Process_analysis:
                 continue
         return proc_list
 
-    def update_process(self):  # Функция обновления данных в таблице с учётом фильтра
+    def update_process(self): # Функция обновления данных в таблице с учётом фильтра
         self.processes = self.get_processes()
         filter_text = self.filter_var.get().strip().lower()
 
-        # Фильтрация
         if filter_text:
             filtered = [p for p in self.processes if filter_text in p['name'].lower()]
         else:
             filtered = self.processes
 
-        # Очистка таблицы
         for item in self.tree.get_children():
             self.tree.delete(item)
 
-        # Заполнение таблицы
         for proc in filtered:
             pid = proc['pid']
             cpu = proc['cpu']
@@ -108,7 +179,7 @@ class Process_analysis:
         self.proverka_processes()
         self.status_var.set(f"Всего процессов: {len(self.processes)}, отображается: {len(filtered)}")
 
-    def proverka_processes(self):  # Проверка на перегружающие процессы и вывод уведомления
+    def proverka_processes(self): # Проверка на перегружающие процессы и вывод уведомления
         current_time = time.time()
         for proc in self.processes:
             pid = proc['pid']
@@ -124,19 +195,20 @@ class Process_analysis:
                         msg += f"  RAM: {ram:.1f}% (порог {RAM_THRESHOLD}%)\n"
                     messagebox.showwarning("Внимание! Перегрузка системы!", msg)
                     self.last_notification_time[pid] = current_time
+                    self.load_file(proc)
 
-    def update_processes(self):  # Автоматическое обновление через 2 секунды
+    def update_processes(self): # Автоматическое обновление через 2 секунды
         self.update_process()
         self.root.after(2000, self.update_processes)
 
-    def on_filter_change(self, *args):  # Обработка изменения фильтра → обновление списка
+    def on_filter_change(self, *args): # Обработка изменения фильтра → обновление списка
         self.update_process()
 
-    def clear_filter(self):  # Сброс фильтрации по имени
+    def clear_filter(self): # Сброс фильтрации по имени
         self.filter_var.set("")
         self.update_process()
 
-    def kill_selected(self):  # Завершение выбранного процесса
+    def kill_selected(self): # Завершение выбранного процесса
         selection = self.tree.selection()
         if not selection:
             messagebox.showwarning("Процесс не выбран!", "Пожалуйста, выберите процесс в таблице!")
